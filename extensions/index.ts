@@ -7,9 +7,18 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 //   p95 = 2,608 chars,  p99 = 6,672 chars,  session-max p95 = 14,676 chars
 // Thresholds are rounded to clean numbers for user-facing messages.
 
+// ── Single-block thresholds (vertical overthinking: one huge block) ─────────
 const WARN_THRESHOLD = 5_000; // above normal p95
 const ALERT_THRESHOLD = 8_000; // above normal p99
 const CRITICAL_THRESHOLD = 12_000; // confirmed overthinking territory
+
+// ── Cumulative thresholds (horizontal spread: many blocks, huge total) ──────
+// Normal models average 25-35 blocks / 5k-35k chars per session.
+// Problem models average 58-88 blocks / 129k-281k chars.
+const SPREAD_BLOCK_WARN = 50;
+const SPREAD_BLOCK_ALERT = 80;
+const SPREAD_TOTAL_WARN = 50_000;
+const SPREAD_TOTAL_ALERT = 100_000;
 
 // ── Messages ────────────────────────────────────────────────────────────────
 
@@ -22,14 +31,24 @@ const MSG_ALERT =
 const MSG_CRITICAL =
   "Thinking block {n} chars. Over 12000 confirmed overthinking. Switch model now or lower reasoning effort if available.";
 
+const MSG_SPREAD_WARN =
+  "Session total {blocks} thinking blocks ({total} chars). Horizontal spread — may be overthinking. Consider switching model or lowering reasoning effort if available.";
+
+const MSG_SPREAD_ALERT =
+  "Session total {blocks} thinking blocks ({total} chars). Horizontal spread — likely overthinking at current effort level. Switch model or lower reasoning effort if available.";
+
 const STATUS_KEY = "overthink-warning";
 
 // ── State ──────────────────────────────────────────────────────────────────
 
-// Track the highest level reached this session so we don't spam the same
-// notification for every block once we've already alerted the user.
+// Single-block tracking: highest level reached + largest block seen.
 let sessionMaxLevel: "none" | "warn" | "alert" | "critical" = "none";
 let sessionMaxBlock = 0;
+
+// Cumulative tracking: total blocks + total chars across the session.
+let sessionBlockCount = 0;
+let sessionTotalChars = 0;
+let sessionSpreadLevel: "none" | "warn" | "alert" = "none";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -64,6 +83,10 @@ function fillTemplate(template: string, n: number): string {
   return template.replace("{n}", String(n));
 }
 
+function fillSpreadTemplate(template: string, blocks: number, total: number): string {
+  return template.replace("{blocks}", String(blocks)).replace("{total}", String(total));
+}
+
 // ── Extension ───────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -71,6 +94,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async () => {
     sessionMaxLevel = "none";
     sessionMaxBlock = 0;
+    sessionBlockCount = 0;
+    sessionTotalChars = 0;
+    sessionSpreadLevel = "none";
   });
 
   // Check thinking block sizes when each assistant message completes.
@@ -80,6 +106,35 @@ export default function (pi: ExtensionAPI) {
     const blocks = getThinkingBlocks(event.message);
     if (blocks.length === 0) return;
 
+    // ── Cumulative tracking (horizontal spread) ───────────────────────────
+    // Always accumulate, even if no single block breaks a record.
+    sessionBlockCount += blocks.length;
+    sessionTotalChars += blocks.reduce((sum, b) => sum + b.length, 0);
+
+    const spreadLevel: "none" | "warn" | "alert" =
+      sessionBlockCount >= SPREAD_BLOCK_ALERT || sessionTotalChars >= SPREAD_TOTAL_ALERT
+        ? "alert"
+        : sessionBlockCount >= SPREAD_BLOCK_WARN || sessionTotalChars >= SPREAD_TOTAL_WARN
+          ? "warn"
+          : "none";
+
+    if (spreadLevel !== "none") {
+      const order = { none: 0, warn: 1, alert: 2 };
+      if (order[spreadLevel] > order[sessionSpreadLevel]) {
+        sessionSpreadLevel = spreadLevel;
+        const spreadMsg = fillSpreadTemplate(
+          spreadLevel === "alert" ? MSG_SPREAD_ALERT : MSG_SPREAD_WARN,
+          sessionBlockCount,
+          sessionTotalChars,
+        );
+        ctx.ui.notify(spreadMsg, "warning");
+        if (spreadLevel === "alert") {
+          ctx.ui.setStatus(STATUS_KEY, spreadMsg);
+        }
+      }
+    }
+
+    // ── Single-block tracking (vertical overthinking) ─────────────────────
     const maxBlock = Math.max(...blocks.map((b) => b.length));
     if (maxBlock <= sessionMaxBlock) return; // no new record
     sessionMaxBlock = maxBlock;
@@ -108,15 +163,6 @@ export default function (pi: ExtensionAPI) {
     // alert and critical: persistent status bar.
     if (level === "alert" || level === "critical") {
       ctx.ui.setStatus(STATUS_KEY, msg);
-    }
-
-    // critical: confirm dialog prompting user action.
-    if (level === "critical" && ctx.hasUI) {
-      await ctx.ui.confirm(
-        "Overthinking detected",
-        "Switch model now or lower reasoning effort if available.",
-      );
-      ctx.ui.setStatus(STATUS_KEY, "");
     }
   });
 }
