@@ -31,9 +31,13 @@
 | warn | 50+ | 或 50,000+ | `ctx.ui.notify()`（黄色警告） |
 | alert | 80+ | 或 100,000+ | `ctx.ui.notify()` + 持续状态栏 |
 
+两项累计都只统计可见 thinking ≥200 字符的块。部分模型（如 OpenAI Responses 系）只暴露加密 `thinkingSignature`，`thinking` 字段仅是一句 ~20-70 字符的摘要标题——不加以区分的话，任何长 session 都会误触发阈值。
+
 任一指标触发阈值就告警。
 
 插件只升级不降级——一旦在某一级别告警过，就不会再对同级或更低级别重复通知。它不会中断模型、不会 steer 对话、不会修改 reasoning content。
+
+持续状态栏在当前 session 内常驻，新 session 开始时清除。
 
 ### 提醒文案
 

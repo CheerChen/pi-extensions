@@ -20,6 +20,12 @@ const SPREAD_BLOCK_ALERT = 80;
 const SPREAD_TOTAL_WARN = 50_000;
 const SPREAD_TOTAL_ALERT = 100_000;
 
+// Only blocks with substantive visible thinking feed the cumulative metrics.
+// OpenAI Responses models expose reasoning as a ~20-70 char summary title
+// plus an encrypted thinkingSignature — one such block per turn would trip
+// the spread thresholds on any long session.
+const SUBSTANTIVE_BLOCK_CHARS = 200;
+
 // ── Messages ────────────────────────────────────────────────────────────────
 
 const MSG_WARN =
@@ -91,12 +97,13 @@ function fillSpreadTemplate(template: string, blocks: number, total: number): st
 
 export default function (pi: ExtensionAPI) {
   // Reset session state on new session.
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
     sessionMaxLevel = "none";
     sessionMaxBlock = 0;
     sessionBlockCount = 0;
     sessionTotalChars = 0;
     sessionSpreadLevel = "none";
+    ctx.ui.setStatus(STATUS_KEY, undefined);
   });
 
   // Check thinking block sizes when each assistant message completes.
@@ -107,9 +114,11 @@ export default function (pi: ExtensionAPI) {
     if (blocks.length === 0) return;
 
     // ── Cumulative tracking (horizontal spread) ───────────────────────────
-    // Always accumulate, even if no single block breaks a record.
-    sessionBlockCount += blocks.length;
-    sessionTotalChars += blocks.reduce((sum, b) => sum + b.length, 0);
+    // Both counters use only substantive blocks — summary-title crumbs would
+    // otherwise reach the char totals on a long enough session too.
+    const substantive = blocks.filter((b) => b.length >= SUBSTANTIVE_BLOCK_CHARS);
+    sessionBlockCount += substantive.length;
+    sessionTotalChars += substantive.reduce((sum, b) => sum + b.length, 0);
 
     const spreadLevel: "none" | "warn" | "alert" =
       sessionBlockCount >= SPREAD_BLOCK_ALERT || sessionTotalChars >= SPREAD_TOTAL_ALERT

@@ -31,9 +31,13 @@ Some models don't produce one huge block but instead spread overthinking across 
 | warn | 50+ | or 50,000+ | `ctx.ui.notify()` (warning) |
 | alert | 80+ | or 100,000+ | `ctx.ui.notify()` + persistent status bar |
 
+Only blocks with at least 200 chars of visible thinking count toward either cumulative metric. Models that expose reasoning as an encrypted `thinkingSignature` (e.g. OpenAI Responses models, where `thinking` holds a ~20-70 char summary title) would otherwise trip the thresholds on any long session.
+
 Either metric crossing a threshold triggers the warning.
 
 The extension only escalates — once it has alerted at a given level, it won't re-notify at the same or lower level. It never interrupts the model, never steers the conversation, and never modifies the reasoning content.
+
+The persistent status bar entry stays for the rest of the session and is cleared when a new session starts.
 
 ## Thresholds
 
