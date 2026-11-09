@@ -15,7 +15,9 @@ const CRITICAL_THRESHOLD = 12_000; // confirmed overthinking territory
 // ── Cumulative thresholds (horizontal spread: many blocks, huge total) ──────
 // Normal models average 25-35 blocks / 5k-35k chars per session.
 // Problem models average 58-88 blocks / 129k-281k chars.
-const SPREAD_BLOCK_WARN = 50;
+// Block count alone never fires: it grows with session length, so a long normal
+// session (e.g. Opus, 50 blocks / 26k chars) would trip it. It only escalates
+// a session that already crossed the char warn line.
 const SPREAD_BLOCK_ALERT = 80;
 const SPREAD_TOTAL_WARN = 50_000;
 const SPREAD_TOTAL_ALERT = 100_000;
@@ -121,9 +123,10 @@ export default function (pi: ExtensionAPI) {
     sessionTotalChars += substantive.reduce((sum, b) => sum + b.length, 0);
 
     const spreadLevel: "none" | "warn" | "alert" =
-      sessionBlockCount >= SPREAD_BLOCK_ALERT || sessionTotalChars >= SPREAD_TOTAL_ALERT
+      sessionTotalChars >= SPREAD_TOTAL_ALERT ||
+      (sessionBlockCount >= SPREAD_BLOCK_ALERT && sessionTotalChars >= SPREAD_TOTAL_WARN)
         ? "alert"
-        : sessionBlockCount >= SPREAD_BLOCK_WARN || sessionTotalChars >= SPREAD_TOTAL_WARN
+        : sessionTotalChars >= SPREAD_TOTAL_WARN
           ? "warn"
           : "none";
 

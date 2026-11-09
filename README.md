@@ -28,12 +28,12 @@ Some models don't produce one huge block but instead spread overthinking across 
 
 | Level | Block count | Total chars | Action |
 |-------|-----------|-------------|--------|
-| warn | 50+ | or 50,000+ | `ctx.ui.notify()` (warning) |
-| alert | 80+ | or 100,000+ | `ctx.ui.notify()` + persistent status bar |
+| warn | — | 50,000+ | `ctx.ui.notify()` (warning) |
+| alert | 80+ (with 50,000+) | or 100,000+ | `ctx.ui.notify()` + persistent status bar |
 
 Only blocks with at least 200 chars of visible thinking count toward either cumulative metric. Models that expose reasoning as an encrypted `thinkingSignature` (e.g. OpenAI Responses models, where `thinking` holds a ~20-70 char summary title) would otherwise trip the thresholds on any long session.
 
-Either metric crossing a threshold triggers the warning.
+Block count never fires on its own: it grows with session length, so a long normal session (50 blocks of ~500 chars) would trip it. It only escalates a session that has already crossed the 50k-char line. Replaying the local sessions (`scripts/replay_spread.py`) shows this keeps every Flash-model hit of the old block-or-chars rule while cutting normal-model false positives (e.g. SWE-2 High 9 → 3 of 69).
 
 The extension only escalates — once it has alerted at a given level, it won't re-notify at the same or lower level. It never interrupts the model, never steers the conversation, and never modifies the reasoning content.
 
@@ -56,7 +56,7 @@ At 5,000 chars, only 1.56% of normal-model blocks trigger (1 in 64). At 12,000 c
 - Normal models average: 25-35 blocks, 5k-35k chars per session
 - Problem models average: 58-88 blocks, 129k-281k chars per session
 
-50 blocks / 50k chars is the normal-model ceiling; 80 blocks / 100k chars enters the problem-model range.
+50k chars is the normal-model ceiling; 100k chars, or 80 blocks on top of 50k, enters the problem-model range.
 
 ## Installation
 

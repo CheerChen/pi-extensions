@@ -28,12 +28,12 @@
 
 | 级别 | 块数 | 总字符 | 动作 |
 |------|------|--------|------|
-| warn | 50+ | 或 50,000+ | `ctx.ui.notify()`（黄色警告） |
-| alert | 80+ | 或 100,000+ | `ctx.ui.notify()` + 持续状态栏 |
+| warn | — | 50,000+ | `ctx.ui.notify()`（黄色警告） |
+| alert | 80+（且 50,000+） | 或 100,000+ | `ctx.ui.notify()` + 持续状态栏 |
 
 两项累计都只统计可见 thinking ≥200 字符的块。部分模型（如 OpenAI Responses 系）只暴露加密 `thinkingSignature`，`thinking` 字段仅是一句 ~20-70 字符的摘要标题——不加以区分的话，任何长 session 都会误触发阈值。
 
-任一指标触发阈值就告警。
+块数不单独触发：它随 session 长度增长，长的正常 session（50 块、每块 ~500 字符）也会攒到。块数只用于把已过 50k 字符的 session 升级为 alert。用本地 session 回放（`scripts/replay_spread.py`），Flash 模型在旧规则（块数或字符）下的命中全部保留，正常模型误报下降（如 SWE-2 High 69 个中 9 → 3）。
 
 插件只升级不降级——一旦在某一级别告警过，就不会再对同级或更低级别重复通知。它不会中断模型、不会 steer 对话、不会修改 reasoning content。
 
@@ -56,12 +56,12 @@ Thinking block {n} chars. Normal models stay under 8000 (p99). Likely overthinki
 Thinking block {n} chars. Over 12000 confirmed overthinking. Switch model now or lower reasoning effort if available.
 ```
 
-**横向铺开 warn（50 块或 50k 字符）**：
+**横向铺开 warn（50k 字符）**：
 ```
 Session total {blocks} thinking blocks ({total} chars). Horizontal spread — may be overthinking. Consider switching model or lowering reasoning effort if available.
 ```
 
-**横向铺开 alert（80 块或 100k 字符）**：
+**横向铺开 alert（100k 字符，或 80 块且 50k 字符）**：
 ```
 Session total {blocks} thinking blocks ({total} chars). Horizontal spread — likely overthinking at current effort level. Switch model or lower reasoning effort if available.
 ```
@@ -85,7 +85,7 @@ Session total {blocks} thinking blocks ({total} chars). Horizontal spread — li
 - 正常模型平均每 session：25-35 块，5k-35k 字符
 - 问题模型平均每 session：58-88 块，129k-281k 字符
 
-50 块 / 50k 字符是正常模型的上界；80 块 / 100k 字符已进入问题模型区间。
+50k 字符是正常模型的上界；100k 字符，或 50k 字符之上再有 80 块，已进入问题模型区间。
 
 ## 安装
 
