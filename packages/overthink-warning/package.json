@@ -1,0 +1,21 @@
+{
+  "name": "pi-overthink-warning",
+  "version": "0.1.0",
+  "description": "Detect overthinking in reasoning models by monitoring thinking block size. Warns the user progressively — does not interrupt or steer the model.",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi-extension", "overthinking", "reasoning", "monitoring"],
+  "type": "module",
+  "files": ["index.ts", "scripts", "README.md", "README.zh-CN.md"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cheerchen/pi-extensions",
+    "directory": "packages/overthink-warning"
+  },
+  "author": "cheerchen"
+}

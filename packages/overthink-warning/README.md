@@ -19,8 +19,8 @@ On each assistant `message_end`, the extension measures the largest thinking blo
 | Level | Threshold | Meaning | Action |
 |-------|-----------|---------|--------|
 | warn | 5,000 chars | Above normal-model p95 (2,608) | `ctx.ui.notify()` (warning) |
-| alert | 8,000 chars | Above normal-model p99 (6,672) | `ctx.ui.notify()` + persistent status bar |
-| critical | 12,000 chars | Confirmed overthinking | `ctx.ui.notify()` (error) + persistent status bar |
+| alert | 8,000 chars | Above normal-model p99 (6,672) | `ctx.ui.notify()` |
+| critical | 12,000 chars | Confirmed overthinking | `ctx.ui.notify()` (error) |
 
 ### 2. Horizontal spread (many blocks, huge total)
 
@@ -29,7 +29,7 @@ Some models don't produce one huge block but instead spread overthinking across 
 | Level | Block count | Total chars | Action |
 |-------|-----------|-------------|--------|
 | warn | — | 50,000+ | `ctx.ui.notify()` (warning) |
-| alert | 80+ (with 50,000+) | or 100,000+ | `ctx.ui.notify()` + persistent status bar |
+| alert | 80+ (with 50,000+) | or 100,000+ | `ctx.ui.notify()` |
 
 Only blocks with at least 200 chars of visible thinking count toward either cumulative metric. Models that expose reasoning as an encrypted `thinkingSignature` (e.g. OpenAI Responses models, where `thinking` holds a ~20-70 char summary title) would otherwise trip the thresholds on any long session.
 
@@ -37,7 +37,7 @@ Block count never fires on its own: it grows with session length, so a long norm
 
 The extension only escalates — once it has alerted at a given level, it won't re-notify at the same or lower level. It never interrupts the model, never steers the conversation, and never modifies the reasoning content.
 
-The persistent status bar entry stays for the rest of the session and is cleared when a new session starts.
+Alert and critical also show a status-bar entry that clears itself after 10 seconds. Run `/overthink` at any time to see the current block count, total chars and levels. On start, reload, resume, fork and `/tree`, the stats are rebuilt silently from the active branch, so history never re-fires old warnings.
 
 ## Thresholds
 
@@ -67,7 +67,7 @@ pi install npm:pi-overthink-warning
 Or test locally:
 
 ```bash
-pi -e /path/to/pi-overthink-warning/extensions/index.ts
+pi -e /path/to/pi-extensions/packages/overthink-warning/index.ts
 ```
 
 ## Permissions

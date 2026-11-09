@@ -3,7 +3,7 @@
 
 old: blocks OR chars fire on their own. new: block count only escalates to alert.
 
-Mirrors extensions/index.ts: only blocks >= 200 chars count, counters only grow,
+Mirrors packages/overthink-warning/index.ts: only blocks >= 200 chars count, counters only grow,
 so the level reached at session end is the highest level ever shown.
 """
 import collections, glob, json, os

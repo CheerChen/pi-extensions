@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // ── Thresholds ─────────────────────────────────────────────────────────────
 // Derived from a 260-session analysis (pi + devin + copilot) comparing normal
@@ -46,6 +46,7 @@ const MSG_SPREAD_ALERT =
   "Session total {blocks} thinking blocks ({total} chars). Horizontal spread — likely overthinking at current effort level. Switch model or lower reasoning effort if available.";
 
 const STATUS_KEY = "overthink-warning";
+const STATUS_TTL_MS = 10_000;
 
 // ── State ──────────────────────────────────────────────────────────────────
 
@@ -57,6 +58,8 @@ let sessionMaxBlock = 0;
 let sessionBlockCount = 0;
 let sessionTotalChars = 0;
 let sessionSpreadLevel: "none" | "warn" | "alert" = "none";
+
+let statusTimer: ReturnType<typeof setTimeout> | undefined;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -87,6 +90,65 @@ function levelFor(size: number): "none" | "warn" | "alert" | "critical" {
   return "none";
 }
 
+// Show a status entry that clears itself, so it never squats on the footer.
+function flashStatus(ctx: { ui: { setStatus(k: string, v: string | undefined): void } }, msg: string) {
+  if (statusTimer) clearTimeout(statusTimer);
+  ctx.ui.setStatus(STATUS_KEY, msg);
+  statusTimer = setTimeout(() => {
+    ctx.ui.setStatus(STATUS_KEY, undefined);
+    statusTimer = undefined;
+  }, STATUS_TTL_MS);
+}
+
+function spreadLevelFor(blocks: number, total: number): "none" | "warn" | "alert" {
+  if (total >= SPREAD_TOTAL_ALERT || (blocks >= SPREAD_BLOCK_ALERT && total >= SPREAD_TOTAL_WARN)) {
+    return "alert";
+  }
+  return total >= SPREAD_TOTAL_WARN ? "warn" : "none";
+}
+
+// Only blocks with substantive visible thinking feed the cumulative metrics.
+function substantiveBlocks(blocks: string[]): string[] {
+  return blocks.filter((b) => b.length >= SUBSTANTIVE_BLOCK_CHARS);
+}
+
+const fmt = (n: number) => n.toLocaleString("en-US");
+
+// Filled share of the scale, like the quota meter but counting up toward a line.
+function bar(value: number, max: number, width = 10): string {
+  const filled = Math.min(width, Math.round((value / max) * width));
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+// First line above `value`, or undefined once every line is crossed.
+function nextLine(value: number, lines: [string, number][]): [string, number] | undefined {
+  return lines.find(([, at]) => value < at);
+}
+
+function detail(value: number, max: number, current: string, lines: [string, number][]): string {
+  const next = nextLine(value, lines);
+  const tail = next ? `next ${next[0]} ${fmt(next[1])} (−${fmt(next[1] - value)})` : "all lines crossed";
+  return `${bar(value, max)} ${fmt(value)} / ${fmt(max)} · ${current} · ${tail}`;
+}
+
+function formatStats(): string {
+  const block = detail(sessionMaxBlock, CRITICAL_THRESHOLD, sessionMaxLevel === "none" ? "ok" : sessionMaxLevel, [
+    ["warn", WARN_THRESHOLD],
+    ["alert", ALERT_THRESHOLD],
+    ["critical", CRITICAL_THRESHOLD],
+  ]);
+  const total = detail(sessionTotalChars, SPREAD_TOTAL_ALERT, sessionSpreadLevel === "none" ? "ok" : sessionSpreadLevel, [
+    ["warn", SPREAD_TOTAL_WARN],
+    ["alert", SPREAD_TOTAL_ALERT],
+  ]);
+  return [
+    `Overthink · this session (thinking blocks ≥${SUBSTANTIVE_BLOCK_CHARS} chars)`,
+    `  Largest block  ${block}`,
+    `  Total chars    ${total}`,
+    `  Blocks         ${sessionBlockCount} · counts toward alert at ${SPREAD_BLOCK_ALERT}, only past ${fmt(SPREAD_TOTAL_WARN)} chars`,
+  ].join("\n");
+}
+
 function fillTemplate(template: string, n: number): string {
   return template.replace("{n}", String(n));
 }
@@ -98,15 +160,32 @@ function fillSpreadTemplate(template: string, blocks: number, total: number): st
 // ── Extension ───────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // Reset session state on new session.
-  pi.on("session_start", async (_event, ctx) => {
-    sessionMaxLevel = "none";
-    sessionMaxBlock = 0;
+  // Rebuild state from the active branch, silently: no notify, no status.
+  // Levels are set to what the history already reached, so only a further
+  // escalation fires a new warning.
+  const rebuild = (ctx: ExtensionContext) => {
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = undefined;
+    ctx.ui.setStatus(STATUS_KEY, undefined);
+
     sessionBlockCount = 0;
     sessionTotalChars = 0;
-    sessionSpreadLevel = "none";
-    ctx.ui.setStatus(STATUS_KEY, undefined);
-  });
+    sessionMaxBlock = 0;
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+      const blocks = getThinkingBlocks(entry.message);
+      if (blocks.length === 0) continue;
+      const substantive = substantiveBlocks(blocks);
+      sessionBlockCount += substantive.length;
+      sessionTotalChars += substantive.reduce((sum, t) => sum + t.length, 0);
+      sessionMaxBlock = Math.max(sessionMaxBlock, ...blocks.map((t) => t.length));
+    }
+    sessionMaxLevel = levelFor(sessionMaxBlock);
+    sessionSpreadLevel = spreadLevelFor(sessionBlockCount, sessionTotalChars);
+  };
+
+  pi.on("session_start", async (_event, ctx) => rebuild(ctx));
+  pi.on("session_tree", async (_event, ctx) => rebuild(ctx)); // /tree changes the branch
 
   // Check thinking block sizes when each assistant message completes.
   pi.on("message_end", async (event, ctx) => {
@@ -118,17 +197,11 @@ export default function (pi: ExtensionAPI) {
     // ── Cumulative tracking (horizontal spread) ───────────────────────────
     // Both counters use only substantive blocks — summary-title crumbs would
     // otherwise reach the char totals on a long enough session too.
-    const substantive = blocks.filter((b) => b.length >= SUBSTANTIVE_BLOCK_CHARS);
+    const substantive = substantiveBlocks(blocks);
     sessionBlockCount += substantive.length;
-    sessionTotalChars += substantive.reduce((sum, b) => sum + b.length, 0);
+    sessionTotalChars += substantive.reduce((sum, t) => sum + t.length, 0);
 
-    const spreadLevel: "none" | "warn" | "alert" =
-      sessionTotalChars >= SPREAD_TOTAL_ALERT ||
-      (sessionBlockCount >= SPREAD_BLOCK_ALERT && sessionTotalChars >= SPREAD_TOTAL_WARN)
-        ? "alert"
-        : sessionTotalChars >= SPREAD_TOTAL_WARN
-          ? "warn"
-          : "none";
+    const spreadLevel = spreadLevelFor(sessionBlockCount, sessionTotalChars);
 
     if (spreadLevel !== "none") {
       const order = { none: 0, warn: 1, alert: 2 };
@@ -140,9 +213,7 @@ export default function (pi: ExtensionAPI) {
           sessionTotalChars,
         );
         ctx.ui.notify(spreadMsg, "warning");
-        if (spreadLevel === "alert") {
-          ctx.ui.setStatus(STATUS_KEY, spreadMsg);
-        }
+        if (spreadLevel === "alert") flashStatus(ctx, spreadMsg);
       }
     }
 
@@ -169,12 +240,16 @@ export default function (pi: ExtensionAPI) {
       n,
     );
 
-    // Always notify the user.
     ctx.ui.notify(msg, level === "critical" ? "error" : "warning");
+    if (level === "alert" || level === "critical") flashStatus(ctx, msg);
+  });
 
-    // alert and critical: persistent status bar.
-    if (level === "alert" || level === "critical") {
-      ctx.ui.setStatus(STATUS_KEY, msg);
-    }
+  // On-demand view of the current stats, so a dismissed warning is not lost.
+  // Same shape as /quotas: a title, then indented label + meter + detail lines.
+  pi.registerCommand("overthink", {
+    description: "Show thinking-block stats and distance to each warning line",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify(formatStats(), "info");
+    },
   });
 }

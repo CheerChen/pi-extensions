@@ -19,8 +19,8 @@
 | 级别 | 阈值 | 含义 | 动作 |
 |------|------|------|------|
 | warn | 5,000 字符 | 超过正常模型 p95（2,608） | `ctx.ui.notify()`（黄色警告） |
-| alert | 8,000 字符 | 超过正常模型 p99（6,672） | `ctx.ui.notify()` + 持续状态栏 |
-| critical | 12,000 字符 | 确认 overthinking | `ctx.ui.notify()`（红色错误）+ 持续状态栏 |
+| alert | 8,000 字符 | 超过正常模型 p99（6,672） | `ctx.ui.notify()` |
+| critical | 12,000 字符 | 确认 overthinking | `ctx.ui.notify()`（红色错误） |
 
 ### 2. 横向铺开（块多但都小，累积量大）
 
@@ -29,15 +29,13 @@
 | 级别 | 块数 | 总字符 | 动作 |
 |------|------|--------|------|
 | warn | — | 50,000+ | `ctx.ui.notify()`（黄色警告） |
-| alert | 80+（且 50,000+） | 或 100,000+ | `ctx.ui.notify()` + 持续状态栏 |
+| alert | 80+（且 50,000+） | 或 100,000+ | `ctx.ui.notify()` |
 
 两项累计都只统计可见 thinking ≥200 字符的块。部分模型（如 OpenAI Responses 系）只暴露加密 `thinkingSignature`，`thinking` 字段仅是一句 ~20-70 字符的摘要标题——不加以区分的话，任何长 session 都会误触发阈值。
 
 块数不单独触发：它随 session 长度增长，长的正常 session（50 块、每块 ~500 字符）也会攒到。块数只用于把已过 50k 字符的 session 升级为 alert。用本地 session 回放（`scripts/replay_spread.py`），Flash 模型在旧规则（块数或字符）下的命中全部保留，正常模型误报下降（如 SWE-2 High 69 个中 9 → 3）。
 
 插件只升级不降级——一旦在某一级别告警过，就不会再对同级或更低级别重复通知。它不会中断模型、不会 steer 对话、不会修改 reasoning content。
-
-持续状态栏在当前 session 内常驻，新 session 开始时清除。
 
 ### 提醒文案
 
@@ -68,6 +66,8 @@ Session total {blocks} thinking blocks ({total} chars). Horizontal spread — li
 
 文案以 switch model 为主建议，因为部分模型（如 Devin 里的 DeepSeek V4/V4.1 Flash）最低只能 high，没有降级空间。
 
+alert 和 critical 还会在状态栏显示提醒，10 秒后自动消失。随时运行 `/overthink` 查看当前 block 数、总字符数和各级别。启动、reload、resume、fork 和 `/tree` 时，统计会从当前分支静默重算，不会为历史内容重复提醒。
+
 ## 阈值依据
 
 基于 260 个 session 的分析，对比正常推理模型（GPT-5.6、GLM-5.2、Claude Opus 4.8）与 overthinking 模型（DeepSeek V4/V4.1 Flash、GLM-5.3 Flash）：
@@ -96,7 +96,7 @@ pi install npm:pi-overthink-warning
 或本地测试：
 
 ```bash
-pi -e /path/to/pi-overthink-warning/extensions/index.ts
+pi -e /path/to/pi-extensions/packages/overthink-warning/index.ts
 ```
 
 ## 权限
