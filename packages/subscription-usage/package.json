@@ -1,0 +1,21 @@
+{
+  "name": "pi-subscription-usage",
+  "version": "0.1.0",
+  "description": "Status-bar meter and /quotas command for Codex, Claude and Grok subscription usage.",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi-extension", "quota", "usage", "status"],
+  "type": "module",
+  "files": ["index.ts", "README.md"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cheerchen/pi-extensions",
+    "directory": "packages/subscription-usage"
+  },
+  "author": "cheerchen"
+}
