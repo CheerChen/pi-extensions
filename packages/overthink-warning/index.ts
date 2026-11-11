@@ -1,93 +1,106 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+// ── Metric ─────────────────────────────────────────────────────────────────
+// Reasoning tokens per assistant reply. Visible thinking text is not a common
+// unit: Claude returns the raw reasoning, OpenAI Responses models only a
+// summary (Codex: a <200-char title) next to an encrypted item. Token counts
+// from usage.reasoning are comparable across providers, but some
+// OpenAI-compatible providers report 0 for replies that carry thousands of
+// chars of visible thinking, so a reply counts as whichever is larger: the
+// reported count or the visible text at CHARS_PER_TOKEN (the median ratio on
+// those providers; Claude's text is denser, but Claude always reports usage).
+const CHARS_PER_TOKEN = 4;
+
 // ── Thresholds ─────────────────────────────────────────────────────────────
-// Derived from a 260-session analysis (pi + devin + copilot) comparing normal
-// reasoning models (GPT-5.6, GLM-5.2, Claude Opus 4.8) against overthinking
-// models (DeepSeek V4/V4.1 Flash, GLM-5.3 Flash).  Normal-model block sizes:
-//   p95 = 2,608 chars,  p99 = 6,672 chars,  session-max p95 = 14,676 chars
-// Thresholds are rounded to clean numbers for user-facing messages.
+// From local pi sessions (scripts/token_baseline.py). Normal reasoning models
+// (GPT-5.6/6.1, Claude, GLM-5.2/5.3, Grok) vs overthinking ones (DeepSeek
+// V4/V4.1 Flash, GLM-5.3 Flash); normal replies: p99 = 2,120, p99.9 = 6,054.
 
-// ── Single-block thresholds (vertical overthinking: one huge block) ─────────
-const WARN_THRESHOLD = 5_000; // above normal p95
-const ALERT_THRESHOLD = 8_000; // above normal p99
-const CRITICAL_THRESHOLD = 12_000; // confirmed overthinking territory
+// Single reply (vertical: one huge chain of thought).
+const REPLY_WARN = 4_000; // 0.2% of normal replies
+const REPLY_ALERT = 8_000; // 0.04% of normal replies
+const REPLY_CRITICAL = 12_000; // one normal reply ever
 
-// ── Cumulative thresholds (horizontal spread: many blocks, huge total) ──────
-// Normal models average 25-35 blocks / 5k-35k chars per session.
-// Problem models average 58-88 blocks / 129k-281k chars.
-// Block count alone never fires: it grows with session length, so a long normal
-// session (e.g. Opus, 50 blocks / 26k chars) would trip it. It only escalates
-// a session that already crossed the char warn line.
-const SPREAD_BLOCK_ALERT = 80;
-const SPREAD_TOTAL_WARN = 50_000;
-const SPREAD_TOTAL_ALERT = 100_000;
-
-// Only blocks with substantive visible thinking feed the cumulative metrics.
-// OpenAI Responses models expose reasoning as a ~20-70 char summary title
-// plus an encrypted thinkingSignature — one such block per turn would trip
-// the spread thresholds on any long session.
-const SUBSTANTIVE_BLOCK_CHARS = 200;
+// Sliding window over the last replies (horizontal: many medium chains). A
+// window, not a session total: a total grows with session length, so long
+// normal sessions would cross any fixed line.
+const WINDOW_REPLIES = 20;
+const WINDOW_WARN = 20_000; // normal session-max window: p95 = 13,542
+const WINDOW_ALERT = 30_000; // above every normal session seen (max 28,252)
 
 // ── Messages ────────────────────────────────────────────────────────────────
 
 const MSG_WARN =
-  "Thinking block {n} chars. Normal models stay under 5000 (p95). May be overthinking — consider switching model or lowering reasoning effort if available.";
+  "Reply used {n} reasoning tokens. Normal replies stay under 4,000. May be overthinking — consider switching model or lowering reasoning effort if available.";
 
 const MSG_ALERT =
-  "Thinking block {n} chars. Normal models stay under 8000 (p99). Likely overthinking at current effort level. Switch model or lower reasoning effort if available.";
+  "Reply used {n} reasoning tokens. Normal replies stay under 8,000. Likely overthinking at current effort level. Switch model or lower reasoning effort if available.";
 
 const MSG_CRITICAL =
-  "Thinking block {n} chars. Over 12000 confirmed overthinking. Switch model now or lower reasoning effort if available.";
+  "Reply used {n} reasoning tokens. Over 12,000 is confirmed overthinking. Switch model now or lower reasoning effort if available.";
 
-const MSG_SPREAD_WARN =
-  "Session total {blocks} thinking blocks ({total} chars). Horizontal spread — may be overthinking. Consider switching model or lowering reasoning effort if available.";
+const MSG_WINDOW_WARN =
+  "Last {replies} replies used {n} reasoning tokens. Sustained heavy reasoning — may be overthinking. Consider switching model or lowering reasoning effort if available.";
 
-const MSG_SPREAD_ALERT =
-  "Session total {blocks} thinking blocks ({total} chars). Horizontal spread — likely overthinking at current effort level. Switch model or lower reasoning effort if available.";
+const MSG_WINDOW_ALERT =
+  "Last {replies} replies used {n} reasoning tokens. Sustained heavy reasoning — likely overthinking at current effort level. Switch model or lower reasoning effort if available.";
 
 const STATUS_KEY = "overthink-warning";
 const STATUS_TTL_MS = 10_000;
 
+type ReplyLevel = "none" | "warn" | "alert" | "critical";
+type WindowLevel = "none" | "warn" | "alert";
+const RANK = { none: 0, warn: 1, alert: 2, critical: 3 } as const;
+
 // ── State ──────────────────────────────────────────────────────────────────
 
-// Single-block tracking: highest level reached + largest block seen.
-let sessionMaxLevel: "none" | "warn" | "alert" | "critical" = "none";
-let sessionMaxBlock = 0;
-
-// Cumulative tracking: total blocks + total chars across the session.
-let sessionBlockCount = 0;
-let sessionTotalChars = 0;
-let sessionSpreadLevel: "none" | "warn" | "alert" = "none";
+let maxReply = 0;
+let replyLevel: ReplyLevel = "none";
+let recent: number[] = []; // last WINDOW_REPLIES replies
+let windowLevel: WindowLevel = "none";
+let totalTokens = 0;
+let replyCount = 0;
 
 let statusTimer: ReturnType<typeof setTimeout> | undefined;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-interface ThinkingBlock {
-  thinking: string;
+function reasoningTokens(message: unknown): number {
+  if (typeof message !== "object" || message === null) return 0;
+  const m = message as Record<string, unknown>;
+  const usage = m.usage as Record<string, unknown> | undefined;
+  const reported = typeof usage?.reasoning === "number" ? usage.reasoning : 0;
+  let chars = 0;
+  if (Array.isArray(m.content)) {
+    for (const block of m.content as Record<string, unknown>[]) {
+      if (block?.type === "thinking" && typeof block.thinking === "string") chars += block.thinking.length;
+    }
+  }
+  return Math.max(reported, Math.ceil(chars / CHARS_PER_TOKEN));
 }
 
-function isThinkingBlock(block: unknown): block is ThinkingBlock {
-  return (
-    typeof block === "object" &&
-    block !== null &&
-    (block as Record<string, unknown>).type === "thinking" &&
-    typeof (block as Record<string, unknown>).thinking === "string"
-  );
-}
-
-function getThinkingBlocks(message: unknown): string[] {
-  if (typeof message !== "object" || message === null) return [];
-  const content = (message as Record<string, unknown>).content;
-  if (!Array.isArray(content)) return [];
-  return content.filter(isThinkingBlock).map((b) => b.thinking);
-}
-
-function levelFor(size: number): "none" | "warn" | "alert" | "critical" {
-  if (size >= CRITICAL_THRESHOLD) return "critical";
-  if (size >= ALERT_THRESHOLD) return "alert";
-  if (size >= WARN_THRESHOLD) return "warn";
+function replyLevelFor(n: number): ReplyLevel {
+  if (n >= REPLY_CRITICAL) return "critical";
+  if (n >= REPLY_ALERT) return "alert";
+  if (n >= REPLY_WARN) return "warn";
   return "none";
+}
+
+function windowLevelFor(n: number): WindowLevel {
+  if (n >= WINDOW_ALERT) return "alert";
+  return n >= WINDOW_WARN ? "warn" : "none";
+}
+
+const windowSum = () => recent.reduce((a, b) => a + b, 0);
+
+// Add one reply to every counter; returns the levels this reply reached.
+function record(tokens: number): { reply: ReplyLevel; window: WindowLevel } {
+  replyCount += 1;
+  totalTokens += tokens;
+  maxReply = Math.max(maxReply, tokens);
+  recent.push(tokens);
+  if (recent.length > WINDOW_REPLIES) recent.shift();
+  return { reply: replyLevelFor(tokens), window: windowLevelFor(windowSum()) };
 }
 
 // Show a status entry that clears itself, so it never squats on the footer.
@@ -100,18 +113,6 @@ function flashStatus(ctx: { ui: { setStatus(k: string, v: string | undefined): v
   }, STATUS_TTL_MS);
 }
 
-function spreadLevelFor(blocks: number, total: number): "none" | "warn" | "alert" {
-  if (total >= SPREAD_TOTAL_ALERT || (blocks >= SPREAD_BLOCK_ALERT && total >= SPREAD_TOTAL_WARN)) {
-    return "alert";
-  }
-  return total >= SPREAD_TOTAL_WARN ? "warn" : "none";
-}
-
-// Only blocks with substantive visible thinking feed the cumulative metrics.
-function substantiveBlocks(blocks: string[]): string[] {
-  return blocks.filter((b) => b.length >= SUBSTANTIVE_BLOCK_CHARS);
-}
-
 const fmt = (n: number) => n.toLocaleString("en-US");
 
 // Filled share of the scale, like the quota meter but counting up toward a line.
@@ -120,41 +121,31 @@ function bar(value: number, max: number, width = 10): string {
   return "█".repeat(filled) + "░".repeat(width - filled);
 }
 
-// First line above `value`, or undefined once every line is crossed.
-function nextLine(value: number, lines: [string, number][]): [string, number] | undefined {
-  return lines.find(([, at]) => value < at);
-}
-
-function detail(value: number, max: number, current: string, lines: [string, number][]): string {
-  const next = nextLine(value, lines);
+function detail(value: number, current: string, lines: [string, number][]): string {
+  const max = lines[lines.length - 1][1];
+  const next = lines.find(([, at]) => value < at);
   const tail = next ? `next ${next[0]} ${fmt(next[1])} (−${fmt(next[1] - value)})` : "all lines crossed";
   return `${bar(value, max)} ${fmt(value)} / ${fmt(max)} · ${current} · ${tail}`;
 }
 
+const label = (level: string) => (level === "none" ? "ok" : level);
+
 function formatStats(): string {
-  const block = detail(sessionMaxBlock, CRITICAL_THRESHOLD, sessionMaxLevel === "none" ? "ok" : sessionMaxLevel, [
-    ["warn", WARN_THRESHOLD],
-    ["alert", ALERT_THRESHOLD],
-    ["critical", CRITICAL_THRESHOLD],
+  const reply = detail(maxReply, label(replyLevel), [
+    ["warn", REPLY_WARN],
+    ["alert", REPLY_ALERT],
+    ["critical", REPLY_CRITICAL],
   ]);
-  const total = detail(sessionTotalChars, SPREAD_TOTAL_ALERT, sessionSpreadLevel === "none" ? "ok" : sessionSpreadLevel, [
-    ["warn", SPREAD_TOTAL_WARN],
-    ["alert", SPREAD_TOTAL_ALERT],
+  const window = detail(windowSum(), label(windowLevel), [
+    ["warn", WINDOW_WARN],
+    ["alert", WINDOW_ALERT],
   ]);
   return [
-    `Overthink · this session (thinking blocks ≥${SUBSTANTIVE_BLOCK_CHARS} chars)`,
-    `  Largest block  ${block}`,
-    `  Total chars    ${total}`,
-    `  Blocks         ${sessionBlockCount} · counts toward alert at ${SPREAD_BLOCK_ALERT}, only past ${fmt(SPREAD_TOTAL_WARN)} chars`,
+    "Overthink · this session (reasoning tokens)",
+    `  Largest reply    ${reply}`,
+    `  Last ${WINDOW_REPLIES} replies  ${window}`,
+    `  Session          ${fmt(totalTokens)} over ${fmt(replyCount)} replies`,
   ].join("\n");
-}
-
-function fillTemplate(template: string, n: number): string {
-  return template.replace("{n}", String(n));
-}
-
-function fillSpreadTemplate(template: string, blocks: number, total: number): string {
-  return template.replace("{blocks}", String(blocks)).replace("{total}", String(total));
 }
 
 // ── Extension ───────────────────────────────────────────────────────────────
@@ -168,86 +159,54 @@ export default function (pi: ExtensionAPI) {
     statusTimer = undefined;
     ctx.ui.setStatus(STATUS_KEY, undefined);
 
-    sessionBlockCount = 0;
-    sessionTotalChars = 0;
-    sessionMaxBlock = 0;
+    maxReply = 0;
+    replyLevel = "none";
+    recent = [];
+    windowLevel = "none";
+    totalTokens = 0;
+    replyCount = 0;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-      const blocks = getThinkingBlocks(entry.message);
-      if (blocks.length === 0) continue;
-      const substantive = substantiveBlocks(blocks);
-      sessionBlockCount += substantive.length;
-      sessionTotalChars += substantive.reduce((sum, t) => sum + t.length, 0);
-      sessionMaxBlock = Math.max(sessionMaxBlock, ...blocks.map((t) => t.length));
+      const reached = record(reasoningTokens(entry.message));
+      if (RANK[reached.reply] > RANK[replyLevel]) replyLevel = reached.reply;
+      if (RANK[reached.window] > RANK[windowLevel]) windowLevel = reached.window;
     }
-    sessionMaxLevel = levelFor(sessionMaxBlock);
-    sessionSpreadLevel = spreadLevelFor(sessionBlockCount, sessionTotalChars);
   };
 
   pi.on("session_start", async (_event, ctx) => rebuild(ctx));
   pi.on("session_tree", async (_event, ctx) => rebuild(ctx)); // /tree changes the branch
 
-  // Check thinking block sizes when each assistant message completes.
+  // Every reply counts, including ones without visible thinking: Codex and some
+  // GLM replies report reasoning tokens but carry no thinking text.
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
 
-    const blocks = getThinkingBlocks(event.message);
-    if (blocks.length === 0) return;
-
-    // ── Cumulative tracking (horizontal spread) ───────────────────────────
-    // Both counters use only substantive blocks — summary-title crumbs would
-    // otherwise reach the char totals on a long enough session too.
-    const substantive = substantiveBlocks(blocks);
-    sessionBlockCount += substantive.length;
-    sessionTotalChars += substantive.reduce((sum, t) => sum + t.length, 0);
-
-    const spreadLevel = spreadLevelFor(sessionBlockCount, sessionTotalChars);
-
-    if (spreadLevel !== "none") {
-      const order = { none: 0, warn: 1, alert: 2 };
-      if (order[spreadLevel] > order[sessionSpreadLevel]) {
-        sessionSpreadLevel = spreadLevel;
-        const spreadMsg = fillSpreadTemplate(
-          spreadLevel === "alert" ? MSG_SPREAD_ALERT : MSG_SPREAD_WARN,
-          sessionBlockCount,
-          sessionTotalChars,
-        );
-        ctx.ui.notify(spreadMsg, "warning");
-        if (spreadLevel === "alert") flashStatus(ctx, spreadMsg);
-      }
-    }
-
-    // ── Single-block tracking (vertical overthinking) ─────────────────────
-    const maxBlock = Math.max(...blocks.map((b) => b.length));
-    if (maxBlock <= sessionMaxBlock) return; // no new record
-    sessionMaxBlock = maxBlock;
-
-    const level = levelFor(maxBlock);
-    if (level === "none") return;
+    const tokens = reasoningTokens(event.message);
+    const reached = record(tokens);
 
     // Only escalate — don't re-notify at the same or lower level.
-    const order = { none: 0, warn: 1, alert: 2, critical: 3 };
-    if (order[level] <= order[sessionMaxLevel]) return;
-    sessionMaxLevel = level;
+    if (RANK[reached.window] > RANK[windowLevel]) {
+      windowLevel = reached.window;
+      const msg = (reached.window === "alert" ? MSG_WINDOW_ALERT : MSG_WINDOW_WARN)
+        .replace("{replies}", String(recent.length))
+        .replace("{n}", fmt(windowSum()));
+      ctx.ui.notify(msg, "warning");
+      if (reached.window === "alert") flashStatus(ctx, msg);
+    }
 
-    const n = maxBlock;
-    const msg = fillTemplate(
-      level === "critical"
-        ? MSG_CRITICAL
-        : level === "alert"
-          ? MSG_ALERT
-          : MSG_WARN,
-      n,
-    );
-
-    ctx.ui.notify(msg, level === "critical" ? "error" : "warning");
-    if (level === "alert" || level === "critical") flashStatus(ctx, msg);
+    if (RANK[reached.reply] > RANK[replyLevel]) {
+      replyLevel = reached.reply;
+      const template = reached.reply === "critical" ? MSG_CRITICAL : reached.reply === "alert" ? MSG_ALERT : MSG_WARN;
+      const msg = template.replace("{n}", fmt(tokens));
+      ctx.ui.notify(msg, reached.reply === "critical" ? "error" : "warning");
+      if (reached.reply !== "warn") flashStatus(ctx, msg);
+    }
   });
 
   // On-demand view of the current stats, so a dismissed warning is not lost.
   // Same shape as /quotas: a title, then indented label + meter + detail lines.
   pi.registerCommand("overthink", {
-    description: "Show thinking-block stats and distance to each warning line",
+    description: "Show reasoning-token stats and distance to each warning line",
     handler: async (_args, ctx) => {
       ctx.ui.notify(formatStats(), "info");
     },
